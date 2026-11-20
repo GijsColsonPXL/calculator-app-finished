@@ -1,0 +1,76 @@
+name: CI with Discord notifications
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    outputs:
+      coverage: ${{ steps.coverage.outputs.pct }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run unit tests with coverage
+        run: npm test -- --coverage --coverageReporters=text --coverageReporters=lcov --coverageReporters=json-summary
+
+      - name: Read coverage percentage
+        id: coverage
+        run: echo "pct=$(jq '.total.lines.pct' coverage/coverage-summary.json)" >> "$GITHUB_OUTPUT"
+
+  notify:
+    needs: test
+    if: always() && (github.ref == 'refs/heads/main' || github.event_name == 'pull_request')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    env:
+      WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+    steps:
+      - name: Discord - push to main success
+        if: github.event_name == 'push' && needs.test.result == 'success'
+        run: |
+          curl -s -H "Content-Type: application/json" \
+            -d '{"content": "✅ Push naar main geslaagd - coverage ${{ needs.test.outputs.coverage }}%"}' \
+            "$WEBHOOK"
+
+      - name: Discord - push to main failure
+        if: github.event_name == 'push' && needs.test.result != 'success'
+        run: |
+          curl -s -H "Content-Type: application/json" \
+            -d '{"content": "❌ Push naar main GEFAALD - check de logs!"}' \
+            "$WEBHOOK"
+
+      - name: Discord - pull request success
+        if: github.event_name == 'pull_request' && needs.test.result == 'success'
+        run: |
+          curl -s -H "Content-Type: application/json" \
+            -d '{"content": "✅ PR #${{ github.event.pull_request.number }} van branch ${{ github.head_ref }} geslaagd - coverage ${{ needs.test.outputs.coverage }}%"}' \
+            "$WEBHOOK"
+
+      - name: Discord - pull request failure
+        if: github.event_name == 'pull_request' && needs.test.result != 'success'
+        run: |
+          curl -s -H "Content-Type: application/json" \
+            -d '{"content": "❌ PR #${{ github.event.pull_request.number }} van branch ${{ github.head_ref }} GEFAALD"}' \
+            "$WEBHOOK"
+
+      - name: Comment on pull request
+        if: github.event_name == 'pull_request'
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ## CI resultaat
+            - Status: **${{ needs.test.result }}**
+            - Branch: `${{ github.head_ref }}`
+            - Test coverage (lines): **${{ needs.test.outputs.coverage }}%**
